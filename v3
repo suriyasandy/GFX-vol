@@ -1,0 +1,133 @@
+# fx_ohlcvol_app_fixed.py - Streamlit App for OHLCVOL with Multi-Currency Summary
+
+import pandas as pd
+import numpy as np
+import streamlit as st
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from hmmlearn.hmm import GaussianHMM
+import shap
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+
+@st.cache_data
+def load_fx_data():
+    df = pd.read_csv("reuters_fx_data.csv")
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df
+
+def compute_log_features(df):
+    df["LogReturn"] = np.log(df["Close"] / df["Close"].shift(1))
+    df["Lag1"] = df["LogReturn"].shift(1)
+    df["Lag2"] = df["LogReturn"].shift(2)
+    df["Lag3"] = df["LogReturn"].shift(3)
+    df["MA5"] = df["LogReturn"].rolling(5).mean()
+    df["Vol5"] = df["LogReturn"].rolling(5).std()
+    return df.dropna().reset_index(drop=True)
+
+def compute_var(log_returns, confidence=0.99):
+    sorted_returns = np.sort(log_returns)
+    index = int((1 - confidence) * len(sorted_returns))
+    return sorted_returns[index]
+
+st.set_page_config(layout="wide")
+st.title("ð FX OHLCVolatility App with Summary (All Currencies)")
+
+ROLL_WINDOW = st.sidebar.selectbox("Rolling Window", [30, 60, 90], index=0)
+model_choice = st.sidebar.radio("Select Model", ["RandomForest", "XGBoost"])
+
+df_all = load_fx_data()
+currencies = sorted(df_all["Currency"].unique())
+
+tab1, tab2 = st.tabs(["Forecast + Explainability", "All-Currency Summary Table"])
+
+with tab1:
+    selected_currency = st.selectbox("Select Currency", currencies)
+    df = df_all[df_all["Currency"] == selected_currency].copy()
+    df = df.sort_values("Date")
+    df = compute_log_features(df)
+
+    X = df[["Lag1", "Lag2", "Lag3", "MA5", "Vol5"]]
+    y = df["OHLCVolatility"]
+    X_train, X_test = X[:-ROLL_WINDOW], X[-ROLL_WINDOW:]
+    y_train, y_test = y[:-ROLL_WINDOW], y[-ROLL_WINDOW:]
+
+    model = RandomForestRegressor() if model_choice == "RandomForest" else XGBRegressor()
+    model.fit(X_train, y_train)
+    y_pred = model.predict(X_test)
+    shap_values = shap.TreeExplainer(model).shap_values(X_test)
+
+    st.subheader("ð Forecast vs Actual OHLCVolatility")
+    forecast_df = df.iloc[-ROLL_WINDOW:].copy()
+    forecast_df["ForecastedVol"] = y_pred
+    forecast_df["ActualVol"] = y_test.values
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=forecast_df["Date"], y=forecast_df["ActualVol"], name="Actual OHLCVol"))
+    fig.add_trace(go.Scatter(x=forecast_df["Date"], y=forecast_df["ForecastedVol"], name="Forecast", line=dict(dash="dot")))
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("ð§  SHAP Feature Importance")
+    fig2, ax = plt.subplots()
+    shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+    st.pyplot(fig2)
+
+    st.subheader("ð Regime Detection")
+    hmm = GaussianHMM(n_components=2, n_iter=1000)
+    hmm.fit(df[["LogReturn"]])
+    df["Regime"] = hmm.predict(df[["LogReturn"]])
+    fig3 = go.Figure()
+    fig3.add_trace(go.Scatter(x=df["Date"], y=df["Close"], name="Close Price"))
+    fig3.add_trace(go.Scatter(x=df["Date"], y=df["Regime"] * df["Close"].max() * 0.1, name="Regime", mode="markers"))
+    st.plotly_chart(fig3, use_container_width=True)
+
+    st.subheader("ð Value at Risk (99%)")
+    var_99 = compute_var(df["LogReturn"].dropna())
+    st.metric(label="99% 1-day VaR", value=f"{round(var_99 * 100, 4)}%")
+
+with tab2:
+    st.subheader("ð Summary Table Across All Currencies")
+    summary_list = []
+
+    for curr in currencies:
+        d = df_all[df_all["Currency"] == curr].copy()
+        d = d.sort_values("Date")
+        d = compute_log_features(d)
+
+        if len(d) < ROLL_WINDOW + 1:
+            continue
+
+        X = d[["Lag1", "Lag2", "Lag3", "MA5", "Vol5"]]
+        y = d["OHLCVolatility"]
+        X_train, X_test = X[:-ROLL_WINDOW], X[-ROLL_WINDOW:]
+        y_train, y_test = y[:-ROLL_WINDOW], y[-ROLL_WINDOW:]
+
+        model = RandomForestRegressor() if model_choice == "RandomForest" else XGBRegressor()
+        model.fit(X_train, y_train)
+        y_pred = model.predict(X_test)
+
+        latest_actual = y_test.values[-1]
+        latest_forecast = y_pred[-1]
+        mae = mean_absolute_error(y_test, y_pred)
+        rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+        var = compute_var(d["LogReturn"].dropna())
+
+        hmm = GaussianHMM(n_components=2, n_iter=1000)
+        hmm.fit(d[["LogReturn"]])
+        regimes = hmm.predict(d[["LogReturn"]])
+
+        summary_list.append({
+            "Currency": curr,
+            "Model": model_choice,
+            "MAE": round(mae, 6),
+            "RMSE": round(rmse, 6),
+            "Latest OHLCVol": round(latest_actual, 5),
+            "Forecasted Vol": round(latest_forecast, 5),
+            "Breach": latest_forecast > latest_actual,
+            "Regimes": len(set(regimes)),
+            "VaR_99": round(var * 100, 4)
+        })
+
+    summary_df = pd.DataFrame(summary_list)
+    st.dataframe(summary_df)

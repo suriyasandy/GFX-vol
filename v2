@@ -1,0 +1,89 @@
+# fx_ohlcvol_app.py - Streamlit App using Real OHLC and OHLCVolatility
+
+import pandas as pd
+import numpy as np
+import streamlit as st
+from sklearn.ensemble import RandomForestRegressor
+from xgboost import XGBRegressor
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from hmmlearn.hmm import GaussianHMM
+import shap
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+
+@st.cache_data
+def load_fx_data():
+    df = pd.read_csv("reuters_fx_data.csv")
+    df["Date"] = pd.to_datetime(df["Date"])
+    return df
+
+st.set_page_config(layout="wide")
+st.title("📊 FX OHLC Volatility Monitoring (Real Data)")
+
+ROLL_WINDOW = st.sidebar.selectbox("Rolling Window", [30, 60, 90], index=0)
+model_choice = st.sidebar.radio("Select Model", ["RandomForest", "XGBoost"])
+
+df_all = load_fx_data()
+selected_currency = st.selectbox("Select Currency", sorted(df_all['Currency'].unique()))
+
+df = df_all[df_all["Currency"] == selected_currency].copy()
+df = df.sort_values("Date").reset_index(drop=True)
+df["LogReturn"] = np.log(df["Close"] / df["Close"].shift(1))
+df["Lag1"] = df["LogReturn"].shift(1)
+df["Lag2"] = df["LogReturn"].shift(2)
+df["Lag3"] = df["LogReturn"].shift(3)
+df["MA5"] = df["LogReturn"].rolling(5).mean()
+df["Vol5"] = df["LogReturn"].rolling(5).std()
+df = df.dropna().reset_index(drop=True)
+
+X = df[["Lag1", "Lag2", "Lag3", "MA5", "Vol5"]]
+y = df["OHLCVolatility"]
+X_train, X_test = X[:-ROLL_WINDOW], X[-ROLL_WINDOW:]
+y_train, y_test = y[:-ROLL_WINDOW], y[-ROLL_WINDOW:]
+
+model = RandomForestRegressor() if model_choice == "RandomForest" else XGBRegressor()
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+
+shap_values = shap.TreeExplainer(model).shap_values(X_test)
+
+st.subheader("📈 Forecast vs Actual OHLCVolatility")
+forecast_df = df.iloc[-ROLL_WINDOW:].copy()
+forecast_df["ForecastedVol"] = y_pred
+forecast_df["ActualVol"] = y_test.values
+
+fig = go.Figure()
+fig.add_trace(go.Scatter(x=forecast_df["Date"], y=forecast_df["ActualVol"], name="Actual OHLCVol"))
+fig.add_trace(go.Scatter(x=forecast_df["Date"], y=forecast_df["ForecastedVol"], name="Forecast", line=dict(dash="dot")))
+st.plotly_chart(fig, use_container_width=True)
+
+st.subheader("🧠 SHAP Feature Importance")
+fig2, ax = plt.subplots()
+shap.summary_plot(shap_values, X_test, plot_type="bar", show=False)
+st.pyplot(fig2)
+
+st.subheader("🔀 Regime Detection via HMM")
+hmm = GaussianHMM(n_components=2, n_iter=1000)
+df['Regime'] = hmm.fit_predict(df[["LogReturn"]])
+fig3 = go.Figure()
+fig3.add_trace(go.Scatter(x=df['Date'], y=df['Close'], name="Close Price"))
+fig3.add_trace(go.Scatter(x=df['Date'], y=df['Regime'] * df['Close'].max() * 0.1, name="Regime", mode="markers"))
+st.plotly_chart(fig3, use_container_width=True)
+
+st.subheader("📉 Value at Risk (99%)")
+sorted_returns = np.sort(df["LogReturn"].dropna())
+var_99 = sorted_returns[int((1 - 0.99) * len(sorted_returns))]
+st.metric(label="99% 1-day VaR", value=f"{round(var_99 * 100, 4)}%")
+
+st.subheader("📋 Summary Table")
+summary_df = pd.DataFrame({
+    "Currency": [selected_currency],
+    "Model": [model_choice],
+    "MAE": [round(mean_absolute_error(y_test, y_pred), 6)],
+    "RMSE": [round(np.sqrt(mean_squared_error(y_test, y_pred)), 6)],
+    "Latest Actual Vol": [round(y_test.values[-1], 5)],
+    "Latest Forecast Vol": [round(y_pred[-1], 5)],
+    "Breach Detected": [y_pred[-1] > y_test.values[-1]],
+    "Regime Count": [df["Regime"].nunique()]
+})
+st.dataframe(summary_df)

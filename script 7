@@ -1,0 +1,121 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+st.set_page_config(layout="wide")
+st.title("📊 FX Threshold Recalibration with Currency-Level Override")
+
+# Upload
+st.sidebar.header("📁 Upload Data")
+threshold_file = st.sidebar.file_uploader("Upload Threshold CSV", type="csv")
+trade_file = st.sidebar.file_uploader("Upload Trade CSV", type="csv")
+
+@st.cache_data
+def load_csv(file):
+    return pd.read_csv(file)
+
+if threshold_file and trade_file:
+    df_threshold = load_csv(threshold_file)
+    df_trades = load_csv(trade_file)
+
+    st.success("✅ Files uploaded successfully")
+
+    # Recalibration Mode Toggle
+    recal_mode = st.sidebar.radio("Recalibration Mode", ["By Group", "By Currency"])
+    df_trades["max_group"] = df_trades[["base_currency_group", "orig_curr_group"]].max(axis=1)
+    df_trades["legal_entity"] = df_trades["legal_entity"].astype(str)
+
+    # Recalibration by Group
+    if recal_mode == "By Group":
+        st.sidebar.header("🔧 Adjust Thresholds per Group")
+        unique_groups = sorted(df_threshold["Group"].unique())
+        new_thresholds = {}
+        threshold_diff = []
+
+        for g in unique_groups:
+            old_val = float(df_threshold[df_threshold["Group"] == g]["value"].mean())
+            new_val = st.sidebar.number_input(f"Group {g} Threshold", value=old_val, format="%.5f")
+            new_thresholds[g] = new_val
+            threshold_diff.append({
+                "Group": g,
+                "Old Threshold": old_val,
+                "New Threshold": new_val,
+                "Delta": round(new_val - old_val, 5)
+            })
+
+        st.subheader("🔄 Threshold Change Summary (Group Level)")
+        st.dataframe(pd.DataFrame(threshold_diff))
+
+        recalibrated_thresholds = pd.DataFrame([
+            {"Group": g, "value": new_thresholds[g]} for g in unique_groups
+        ])
+
+        valid_groups = set(recalibrated_thresholds["Group"])
+        df_trades = df_trades[df_trades["max_group"].isin(valid_groups)]
+        df_result = df_trades.merge(recalibrated_thresholds, how="left", left_on="max_group", right_on="Group")
+        df_result["threshold_used"] = df_result["value"]
+
+    # Recalibration by Currency
+    else:
+        st.sidebar.header("🔧 Adjust Thresholds per Currency")
+        df_currency_thresh = df_threshold.copy()
+        new_thresholds = []
+        group_ranges = df_currency_thresh.groupby("Group")["value"].agg(["min", "max"]).reset_index()
+
+        for currency in sorted(df_currency_thresh["ccy"].unique()):
+            current_val = df_currency_thresh[df_currency_thresh["ccy"] == currency]["value"].values[0]
+            new_val = st.sidebar.number_input(f"{currency} Threshold", value=current_val, format="%.5f")
+            # Determine new group
+            new_group = None
+            for _, row in group_ranges.iterrows():
+                if row["min"] <= new_val <= row["max"]:
+                    new_group = row["Group"]
+                    break
+            if new_group is None:
+                new_group = df_currency_thresh[df_currency_thresh["ccy"] == currency]["Group"].values[0]
+            new_thresholds.append({"ccy": currency, "value": new_val, "NewGroup": new_group})
+
+        df_updated = pd.DataFrame(new_thresholds)
+        st.subheader("🔁 Currency Threshold Reassignment Summary")
+        df_merged = df_currency_thresh.merge(df_updated, on="ccy", suffixes=("_Old", "_New"))
+        df_merged["Delta"] = round(df_merged["value_New"] - df_merged["value_Old"], 5)
+        st.dataframe(df_merged)
+
+        # Use new group reassignment
+        df_threshold_updated = df_merged[["ccy", "value_New", "NewGroup"]].rename(columns={"value_New": "value", "NewGroup": "Group"})
+        df_threshold_updated["Group"] = df_threshold_updated["Group"].astype(int)
+
+        # Map updated thresholds to trades using ccy group logic
+        df_trades = df_trades.merge(df_threshold_updated.rename(columns={"ccy": "currency_pair"}), on="currency_pair", how="left")
+        df_trades["threshold_used"] = df_trades["value"]
+        df_result = df_trades.copy()
+
+    df_result["is_within_threshold"] = df_result["deviation_percent"] <= df_result["threshold_used"]
+
+    # Group-level summary
+    st.subheader("📊 Threshold Impact Summary")
+    group_summary = df_result.groupby("max_group").agg(
+        Total_Trades=('trade_id', 'count'),
+        Breaches=('is_within_threshold', lambda x: (~x).sum()),
+        Within_Threshold=('is_within_threshold', 'sum')
+    ).reset_index()
+    group_summary["Breach %"] = round((group_summary["Breaches"] / group_summary["Total_Trades"]) * 100, 2)
+    st.dataframe(group_summary)
+
+    fig_kpi = px.bar(group_summary, x='max_group', y='Breach %', text='Breach %',
+                     color='Breach %', color_continuous_scale='Reds',
+                     title="🚦 Breach % by Group")
+    fig_kpi.update_traces(texttemplate='%{text}%', textposition='outside')
+    st.plotly_chart(fig_kpi, use_container_width=True)
+
+    st.subheader("📂 Currency Pair-Level View")
+    for pair in df_result["currency_pair"].unique():
+        with st.expander(f"📉 Pair: {pair}"):
+            st.dataframe(df_result[df_result["currency_pair"] == pair][[
+                "trade_id", "legal_entity", "deviation_percent", "threshold_used", "is_within_threshold"
+            ]].head(100))
+
+    st.download_button("📥 Download Final Results", df_result.to_csv(index=False), "fx_threshold_final_output.csv")
+
+else:
+    st.warning("Please upload both threshold and trade CSV files.")

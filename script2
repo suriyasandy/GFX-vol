@@ -1,0 +1,61 @@
+import streamlit as st
+import pandas as pd
+
+st.set_page_config(layout="wide")
+st.title("🏦 FX Deviation Threshold Checker (Split by Legal Entity)")
+
+# --- Upload section ---
+st.sidebar.header("📁 Upload Data")
+threshold_file = st.sidebar.file_uploader("Upload Threshold CSV", type="csv")
+trade_file = st.sidebar.file_uploader("Upload Trade CSV", type="csv")
+
+@st.cache_data
+def load_csv(file):
+    return pd.read_csv(file)
+
+if threshold_file and trade_file:
+    df_threshold = load_csv(threshold_file)
+    df_trades = load_csv(trade_file)
+
+    st.success("✅ Files uploaded successfully")
+
+    # --- Vectorized threshold logic based on Legal Entity + Group ---
+    group_thresholds = df_threshold.groupby(["legal_entity", "Group"])["value"].max().reset_index()
+    df_trades["max_group"] = df_trades[["base_currency_group", "orig_curr_group"]].max(axis=1)
+
+    # Merge threshold using legal_entity and max_group
+    df_merged = df_trades.merge(
+        group_thresholds,
+        how="left",
+        left_on=["legal_entity", "max_group"],
+        right_on=["legal_entity", "Group"]
+    ).rename(columns={"value": "threshold_used"})
+
+    df_merged["is_within_threshold"] = df_merged["deviation_percent"] <= df_merged["threshold_used"]
+
+    st.subheader("📊 Results by Legal Entity")
+
+    for entity in df_merged["legal_entity"].unique():
+        st.markdown(f"### 🏛️ Legal Entity: `{entity}`")
+        df_entity = df_merged[df_merged["legal_entity"] == entity]
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Trades", len(df_entity))
+        col2.metric("Breaches", (~df_entity["is_within_threshold"]).sum())
+        col3.metric("Within Threshold", df_entity["is_within_threshold"].sum())
+
+        if df_entity.memory_usage(deep=True).sum() < 50 * 1024**2:
+            with st.expander("View Top 100 Rows", expanded=False):
+                st.dataframe(df_entity.head(100))
+        else:
+            st.info("📦 Large dataset for this entity. Display skipped. Download below.")
+
+        st.download_button(
+            label=f"📥 Download `{entity}` Results CSV",
+            data=df_entity.to_csv(index=False),
+            file_name=f"fx_results_{entity}.csv",
+            mime="text/csv"
+        )
+
+else:
+    st.warning("Please upload both the threshold and trade files to begin.")

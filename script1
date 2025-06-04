@@ -1,0 +1,51 @@
+
+import streamlit as st
+import pandas as pd
+
+st.set_page_config(layout="wide")
+st.title("🚀 FX Trade Deviation Threshold Checker (Optimized)")
+
+# --- Upload section ---
+st.sidebar.header("📁 Upload Data")
+threshold_file = st.sidebar.file_uploader("Upload Threshold CSV", type="csv")
+trade_file = st.sidebar.file_uploader("Upload Trade CSV", type="csv")
+
+@st.cache_data
+def load_csv(file):
+    return pd.read_csv(file)
+
+if threshold_file and trade_file:
+    df_threshold = load_csv(threshold_file)
+    df_trades = load_csv(trade_file)
+
+    st.success("✅ Files uploaded successfully")
+
+    # --- Vectorized threshold logic ---
+    group_thresholds = df_threshold.groupby("Group")["value"].max().to_dict()
+    df_trades["max_group"] = df_trades[["base_currency_group", "orig_curr_group"]].max(axis=1)
+    df_trades["threshold_used"] = df_trades["max_group"].map(group_thresholds)
+    df_trades["is_within_threshold"] = df_trades["deviation_percent"] <= df_trades["threshold_used"]
+
+    # --- Summary ---
+    st.subheader("📌 Summary")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Trades", len(df_trades))
+    col2.metric("Breaches", (~df_trades["is_within_threshold"]).sum())
+    col3.metric("Within Threshold", df_trades["is_within_threshold"].sum())
+
+    # --- Display only small preview ---
+    if df_trades.memory_usage(deep=True).sum() < 100 * 1024**2:
+        st.subheader("📊 Preview (Top 100 Rows)")
+        st.dataframe(df_trades.head(100))
+    else:
+        st.warning("⚠️ Large dataset detected. Display skipped for performance. Please download results.")
+
+    # --- Download ---
+    st.download_button(
+        "📥 Download Full Results CSV",
+        data=df_trades.to_csv(index=False),
+        file_name="fx_threshold_results.csv",
+        mime="text/csv"
+    )
+else:
+    st.warning("Please upload both the threshold and trade files to begin.")

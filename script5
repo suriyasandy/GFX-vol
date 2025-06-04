@@ -1,0 +1,103 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+
+st.set_page_config(layout="wide")
+st.title("📊 FX Threshold Recalibration & Compliance Dashboard")
+
+# --- Upload section ---
+st.sidebar.header("📁 Upload Data")
+threshold_file = st.sidebar.file_uploader("Upload Threshold CSV", type="csv")
+trade_file = st.sidebar.file_uploader("Upload Trade CSV", type="csv")
+
+@st.cache_data
+def load_csv(file):
+    return pd.read_csv(file)
+
+if threshold_file and trade_file:
+    df_threshold = load_csv(threshold_file)
+    df_trades = load_csv(trade_file)
+
+    st.success("✅ Files uploaded successfully")
+
+    # Recalibration section
+    st.sidebar.header("🔧 Recalibrate Thresholds by Group")
+    unique_groups = sorted(df_threshold["Group"].unique())
+    new_thresholds = {}
+    threshold_diff = []
+
+    for g in unique_groups:
+        old_val = float(df_threshold[df_threshold["Group"] == g]["value"].mean())
+        new_val = st.sidebar.number_input(f"Group {g} Threshold", value=old_val, format="%.5f")
+        new_thresholds[g] = new_val
+        threshold_diff.append({
+            "Group": g,
+            "Old Threshold": old_val,
+            "New Threshold": new_val,
+            "Delta": round(new_val - old_val, 5)
+        })
+
+    st.subheader("🔄 Threshold Change Summary")
+    st.dataframe(pd.DataFrame(threshold_diff))
+
+    # Apply recalibrated thresholds
+    recalibrated_thresholds = pd.DataFrame([
+        {"Group": g, "value": new_thresholds[g]} for g in unique_groups
+    ])
+
+    df_trades["max_group"] = df_trades[["base_currency_group", "orig_curr_group"]].max(axis=1)
+    df_trades["legal_entity"] = df_trades["legal_entity"].astype(str)
+
+    # Filter invalid groups
+    valid_groups = set(recalibrated_thresholds["Group"])
+    invalid_groups = set(df_trades["max_group"].unique()) - valid_groups
+    if invalid_groups:
+        st.warning(f"⚠️ These groups are in trades but missing in threshold input: {sorted(invalid_groups)}. They will be excluded.")
+        df_trades = df_trades[df_trades["max_group"].isin(valid_groups)]
+
+    # Merge thresholds and compute results
+    df_result = df_trades.merge(recalibrated_thresholds, how="left", left_on="max_group", right_on="Group")
+    df_result["threshold_used"] = df_result["value"]
+    df_result["is_within_threshold"] = df_result["deviation_percent"] <= df_result["threshold_used"]
+
+    # Group-level Summary
+    st.subheader("📊 Group-Level Compliance Summary")
+    group_summary = df_result.groupby("max_group").agg(
+        Total_Trades=('trade_id', 'count'),
+        Breaches=('is_within_threshold', lambda x: (~x).sum()),
+        Within_Threshold=('is_within_threshold', 'sum')
+    ).reset_index()
+    group_summary["Breach %"] = round((group_summary["Breaches"] / group_summary["Total_Trades"]) * 100, 2)
+
+    st.dataframe(group_summary)
+
+    # KPI Chart
+    st.markdown("### 🚦 Breach % by Group")
+    fig_breach = px.bar(group_summary, x='max_group', y='Breach %', text='Breach %',
+                        color='Breach %', color_continuous_scale='Reds',
+                        title="Compliance Risk: Breach % by Group",
+                        labels={'max_group': 'Volatility Group'})
+    fig_breach.update_traces(texttemplate='%{text}%', textposition='outside')
+    st.plotly_chart(fig_breach, use_container_width=True)
+
+    # Boxplot of deviation %
+    st.markdown("### 📈 Deviation Distribution by Group")
+    fig_box = px.box(df_result, x="max_group", y="deviation_percent", points="outliers",
+                     title="Deviation % Distribution by Group",
+                     labels={"max_group": "Volatility Group", "deviation_percent": "Trade Deviation %"})
+    st.plotly_chart(fig_box, use_container_width=True)
+
+    # Expandable per-currency-pair results
+    st.subheader("📂 Currency Pair-Level Inspection")
+    for pair in df_result["currency_pair"].unique():
+        with st.expander(f"📉 Currency Pair: {pair}"):
+            df_pair = df_result[df_result["currency_pair"] == pair]
+            st.write(f"Total Trades: {len(df_pair)} | Breaches: {(~df_pair['is_within_threshold']).sum()} | Compliance: {df_pair['is_within_threshold'].sum()}")
+            st.dataframe(df_pair[["trade_id", "legal_entity", "deviation_percent", "threshold_used", "is_within_threshold"]].head(100))
+
+    # Final download
+    st.download_button("📥 Download Full Recalibrated Trade-Level Results",
+                       df_result.to_csv(index=False), file_name="fx_final_recalibrated.csv")
+
+else:
+    st.warning("Please upload both the threshold and trade files to begin.")

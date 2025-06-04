@@ -1,0 +1,38 @@
+import streamlit as st
+import pandas as pd
+
+st.title("📉 FX Trade Deviation Threshold Checker")
+
+# --- Upload section ---
+st.sidebar.header("📁 Upload Data")
+threshold_file = st.sidebar.file_uploader("Upload Threshold CSV", type="csv")
+trade_file = st.sidebar.file_uploader("Upload Trade CSV", type="csv")
+
+if threshold_file and trade_file:
+    df_threshold = pd.read_csv(threshold_file)
+    df_trades = pd.read_csv(trade_file)
+
+    st.success("✅ Files uploaded successfully")
+
+    # --- Threshold Lookup Function ---
+    def get_threshold(row):
+        group = max(row["base_currency_group"], row["orig_curr_group"])
+        threshold = df_threshold[df_threshold["Group"] == group]["value"].max()
+        return threshold
+
+    df_trades["threshold_used"] = df_trades.apply(get_threshold, axis=1)
+    df_trades["is_within_threshold"] = df_trades["deviation_percent"] <= df_trades["threshold_used"]
+
+    # --- Display ---
+    st.subheader("📊 Trade Deviation Check Results")
+    st.dataframe(df_trades)
+
+    st.subheader("📌 Summary")
+    st.metric("Total Trades", len(df_trades))
+    st.metric("Breaches", (~df_trades["is_within_threshold"]).sum())
+    st.metric("Within Threshold", df_trades["is_within_threshold"].sum())
+
+    st.download_button("📥 Download Result CSV", df_trades.to_csv(index=False), file_name="fx_threshold_results.csv")
+
+else:
+    st.warning("Please upload both the threshold and trade files to begin.")

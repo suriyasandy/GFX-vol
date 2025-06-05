@@ -1,0 +1,132 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import re
+
+st.set_page_config(layout="wide")
+st.title("📊 FX Threshold Recalibration (Optimized for Large Datasets)")
+
+# Upload
+st.sidebar.header("📁 Upload Data")
+threshold_file = st.sidebar.file_uploader("Upload Threshold CSV", type="csv")
+trade_file = st.sidebar.file_uploader("Upload Trade CSV", type="csv")
+
+@st.cache_data
+def load_csv(file):
+    return pd.read_csv(file)
+
+def clean_group_column(df):
+    if "Group" in df.columns:
+        df["Group"] = df["Group"].astype(str).str.extract(r"(\d+)")[0]
+        df = df.dropna(subset=["Group"])
+        df["Group"] = df["Group"].astype(int)
+    return df
+
+if threshold_file and trade_file:
+    df_threshold = load_csv(threshold_file)
+    df_trades = load_csv(trade_file)
+
+    st.success("✅ Files uploaded successfully")
+    df_threshold = clean_group_column(df_threshold)
+    st.markdown("### 🧾 Cleaned Threshold File Preview:")
+    st.dataframe(df_threshold.head())
+
+    recal_mode = st.sidebar.radio("Recalibration Mode", ["By Group", "By Currency"])
+    df_trades["max_group"] = df_trades[["base_curr_group", "orig_curr_group"]].max(axis=1)
+    df_trades["legal_entity"] = df_trades["legal_entity"].astype(str)
+
+    df_result = pd.DataFrame()
+    if recal_mode == "By Group":
+        st.sidebar.header("🔧 Adjust Thresholds by Group")
+        unique_groups = sorted(df_threshold["Group"].unique())
+        new_thresholds = []
+        for g in unique_groups:
+            old_val = float(df_threshold[df_threshold["Group"] == g]["value"].mean())
+            new_val = st.sidebar.number_input(f"Group {g} Threshold", value=old_val, format="%.5f")
+            new_thresholds.append({
+                "Group": g,
+                "Old Threshold": old_val,
+                "New Threshold": new_val,
+                "Delta": round(new_val - old_val, 5)
+            })
+
+        df_group_thresh = pd.DataFrame(new_thresholds)
+        df_group_thresh["Group Label"] = df_group_thresh["Group"].apply(lambda x: f"Group {x}")
+        st.subheader("🔄 Threshold Change Summary (Group Level)")
+        st.dataframe(df_group_thresh)
+
+        recalibrated_thresholds = df_group_thresh[["Group", "New Threshold"]].rename(columns={"New Threshold": "value"})
+        df_result = df_trades[df_trades["max_group"].isin(recalibrated_thresholds["Group"])]
+        df_result = df_result.merge(recalibrated_thresholds, how="left", left_on="max_group", right_on="Group", suffixes=('', '_r'))
+        if "value" in df_result.columns:
+            df_result["threshold_used"] = df_result["value"]
+
+    else:
+        st.sidebar.header("🔧 Adjust Thresholds by Currency")
+        if "CCY" not in df_threshold.columns:
+            st.error("Threshold file must contain 'CCY' column for 'By Currency' mode.")
+        else:
+            group_ranges = df_threshold.groupby("Group")["value"].agg(["min", "max"]).reset_index()
+            updated = []
+            for ccy in sorted(df_threshold["CCY"].dropna().unique()):
+                current_val = df_threshold[df_threshold["CCY"] == ccy]["value"].values[0]
+                new_val = st.sidebar.number_input(f"{ccy}", value=current_val, format="%.5f")
+                new_group = None
+                for _, r in group_ranges.iterrows():
+                    if r["min"] <= new_val <= r["max"]:
+                        new_group = int(r["Group"])
+                        break
+                if new_group is None:
+                    new_group = int(df_threshold[df_threshold["CCY"] == ccy]["Group"].values[0])
+                updated.append({
+                    "CCY": ccy,
+                    "Old": current_val,
+                    "New": new_val,
+                    "Group": new_group,
+                    "Delta": round(new_val - current_val, 5)
+                })
+
+            df_currency_thresh = pd.DataFrame(updated)
+            df_currency_thresh["Group Label"] = df_currency_thresh["Group"].apply(lambda x: f"Group {x}")
+            st.subheader("🔄 Threshold Change Summary (Currency Level)")
+            st.dataframe(df_currency_thresh)
+
+            df_trades = df_trades.merge(df_currency_thresh.rename(columns={"CCY": "currency_pair"}), on="currency_pair", how="left")
+            if "New" in df_trades.columns:
+                df_trades["threshold_used"] = df_trades["New"]
+            df_result = df_trades
+
+    if not df_result.empty and "threshold_used" in df_result.columns:
+        df_result["is_within_threshold"] = df_result["deviation_percent"] <= df_result["threshold_used"]
+
+        st.subheader("📊 Threshold Impact Summary")
+        group_summary = df_result.groupby("max_group", observed=True).agg(
+            Total_Trades=('trade_id', 'count'),
+            Breaches=('is_within_threshold', lambda x: (~x).sum()),
+            Within_Threshold=('is_within_threshold', 'sum')
+        ).reset_index()
+        group_summary["Breach %"] = round((group_summary["Breaches"] / group_summary["Total_Trades"]) * 100, 2)
+        group_summary["Group Label"] = group_summary["max_group"].apply(lambda x: f"Group {x}")
+        st.dataframe(group_summary)
+
+        fig_kpi = px.bar(group_summary, x='Group Label', y='Breach %', text='Breach %',
+                         color='Breach %', color_continuous_scale='Reds',
+                         title="🚦 Breach % by Group")
+        fig_kpi.update_traces(texttemplate='%{text}%', textposition='outside')
+        st.plotly_chart(fig_kpi, use_container_width=True)
+
+        st.subheader("📂 Currency Pair-Level Breach Sample")
+        sample_pairs = df_result["currency_pair"].dropna().unique()[:5]  # show only first 5
+        for pair in sample_pairs:
+            with st.expander(f"📉 Pair: {pair} (Top 100 rows only)"):
+                st.dataframe(df_result[df_result["currency_pair"] == pair][[
+                    "trade_id", "legal_entity", "deviation_percent", "threshold_used", "is_within_threshold"
+                ]].head(100))
+
+        st.download_button("📥 Download Final Results", df_result.to_csv(index=False), "fx_threshold_final_output.csv")
+
+    else:
+        st.error("❌ Threshold assignment failed. Please verify your inputs and try again.")
+
+else:
+    st.warning("📥 Please upload both threshold and trade CSV files.")

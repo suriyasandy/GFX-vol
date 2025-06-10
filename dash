@@ -1,0 +1,118 @@
+import dash
+from dash import dcc, html, dash_table, Input, Output, State, ctx
+import pandas as pd
+import plotly.express as px
+import base64
+import io
+
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.title = "FX Alert Calibration Dashboard"
+
+app.layout = html.Div([
+    html.H2("📈 FX Alert Calibration Dashboard (Modular Dash App)"),
+
+    dcc.Tabs([
+        dcc.Tab(label="1. Upload & Calibration", children=[
+            html.Br(),
+            dcc.Upload(
+                id='upload-gfx',
+                children=html.Div(['📂 Drag or Select GFX Threshold File (CSV)']),
+                style={'width': '45%', 'display': 'inline-block', 'padding': '10px'},
+                multiple=False
+            ),
+            dcc.Upload(
+                id='upload-trade',
+                children=html.Div(['📂 Drag or Select Trade File (CSV)']),
+                style={'width': '45%', 'display': 'inline-block', 'padding': '10px'},
+                multiple=False
+            ),
+            html.Br(),
+            html.Label("Calibration Mode:"),
+            dcc.RadioItems(
+                id='calibration-mode',
+                options=[
+                    {'label': 'Currency Level', 'value': 'currency'},
+                    {'label': 'Group Level', 'value': 'group'}
+                ],
+                value='currency',
+                labelStyle={'display': 'inline-block', 'margin-right': '20px'}
+            ),
+            html.Div(id='dynamic-calibration-controls')
+        ]),
+        dcc.Tab(label="2. Alert Impact Summary", children=[
+            html.Br(),
+            html.Div(id='summary-kpis', style={'display': 'flex', 'justify-content': 'space-between'}),
+            dcc.Graph(id='alert-comparison-graph')
+        ]),
+        dcc.Tab(label="3. Trade-Level Table", children=[
+            html.Br(),
+            html.Div(id='trade-table-container')
+        ])
+    ]),
+
+    dcc.Store(id='stored-gfx'),
+    dcc.Store(id='stored-trade'),
+    dcc.Store(id='stored-calibrated'),
+    dcc.Store(id='stored-output')
+])
+
+def parse_contents(contents):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    return pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+
+@app.callback(
+    Output('stored-gfx', 'data'),
+    Input('upload-gfx', 'contents')
+)
+def store_gfx_data(contents):
+    if contents:
+        df = parse_contents(contents)
+        return df.to_dict('records')
+
+@app.callback(
+    Output('stored-trade', 'data'),
+    Input('upload-trade', 'contents')
+)
+def store_trade_data(contents):
+    if contents:
+        df = parse_contents(contents)
+        return df.to_dict('records')
+
+@app.callback(
+    Output('dynamic-calibration-controls', 'children'),
+    Input('calibration-mode', 'value'),
+    State('stored-gfx', 'data')
+)
+def render_calibration_controls(mode, gfx_data):
+    if not gfx_data:
+        return html.Div("Upload GFX data to proceed.")
+    df = pd.DataFrame(gfx_data)
+    controls = []
+    if mode == "currency":
+        for ccy in sorted(df["Currency"].unique()):
+            val = round(df[df["Currency"] == ccy]["Value"].mean(), 2)
+            controls.append(html.Div([
+                html.Label(f"{ccy} Threshold:"),
+                dcc.Slider(id={'type': 'cal-slider', 'index': ccy},
+                           min=0.5, max=10.0, step=0.1, value=val,
+                           tooltip={"placement": "bottom"})
+            ], style={'margin': '10px 0'}))
+    else:
+        for grp in sorted(df["Group"].unique()):
+            val = round(df[df["Group"] == grp]["Value"].mean(), 2)
+            controls.append(html.Div([
+                html.Label(f"{grp} Threshold:"),
+                dcc.Slider(id={'type': 'cal-slider', 'index': grp},
+                           min=0.5, max=10.0, step=0.1, value=val,
+                           tooltip={"placement": "bottom"})
+            ], style={'margin': '10px 0'}))
+    return html.Div(controls)
+
+# You can extend the rest of the callbacks to:
+# - Apply calibration to stored GFX
+# - Compute thresholds before/after
+# - Render KPIs and trade comparison tables
+
+if __name__ == '__main__':
+    app.run_server(debug=True)

@@ -1,0 +1,172 @@
+import dash
+from dash import dcc, html, dash_table, Input, Output, State, ctx
+import pandas as pd
+import plotly.express as px
+import base64
+import io
+
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.title = "FX Alert Calibration Dashboard"
+
+app.layout = html.Div([
+    html.H2("📈 FX Alert Calibration Dashboard"),
+
+    dcc.Tabs([
+        dcc.Tab(label="1. Upload & Calibration", children=[
+            html.Br(),
+            dcc.Upload(id='upload-gfx', children=html.Div(['📂 Upload GFX Threshold File (CSV)']),
+                       style={'width': '45%', 'display': 'inline-block', 'padding': '10px'}, multiple=False),
+            dcc.Upload(id='upload-trade', children=html.Div(['📂 Upload Trade File (CSV)']),
+                       style={'width': '45%', 'display': 'inline-block', 'padding': '10px'}, multiple=False),
+            html.Br(),
+            html.Label("Calibration Mode:"),
+            dcc.RadioItems(id='calibration-mode',
+                options=[{'label': 'Currency Level', 'value': 'currency'},
+                         {'label': 'Group Level', 'value': 'group'}],
+                value='currency', labelStyle={'display': 'inline-block', 'margin-right': '20px'}
+            ),
+            html.Div(id='dynamic-calibration-controls')
+        ]),
+        dcc.Tab(label="2. Alert Impact Summary", children=[
+            html.Br(),
+            html.Div(id='summary-kpis', style={'display': 'flex', 'justify-content': 'space-between'}),
+            dcc.Graph(id='alert-comparison-graph')
+        ]),
+        dcc.Tab(label="3. Trade-Level Table", children=[
+            html.Br(),
+            html.Div(id='trade-table-container')
+        ])
+    ]),
+
+    dcc.Store(id='stored-gfx'),
+    dcc.Store(id='stored-trade'),
+    dcc.Store(id='stored-calibrated'),
+    dcc.Store(id='stored-output')
+])
+
+def parse_contents(contents):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    return pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+
+@app.callback(Output('stored-gfx', 'data'), Input('upload-gfx', 'contents'))
+def store_gfx_data(contents):
+    return parse_contents(contents).to_dict('records') if contents else None
+
+@app.callback(Output('stored-trade', 'data'), Input('upload-trade', 'contents'))
+def store_trade_data(contents):
+    return parse_contents(contents).to_dict('records') if contents else None
+
+@app.callback(
+    Output('dynamic-calibration-controls', 'children'),
+    Input('calibration-mode', 'value'),
+    State('stored-gfx', 'data')
+)
+def render_calibration_controls(mode, gfx_data):
+    if not gfx_data:
+        return html.Div("Upload GFX data to proceed.")
+    df = pd.DataFrame(gfx_data)
+    controls = []
+    if mode == "currency":
+        for ccy in sorted(df["Currency"].unique()):
+            val = round(df[df["Currency"] == ccy]["Value"].mean(), 2)
+            controls.append(html.Div([
+                html.Label(f"{ccy} Threshold:"),
+                dcc.Slider(id={'type': 'cal-slider', 'index': ccy}, min=0.5, max=10.0, step=0.1, value=val,
+                           tooltip={"placement": "bottom"})
+            ]))
+    else:
+        for grp in sorted(df["Group"].astype(str).unique()):
+            val = round(df[df["Group"] == grp]["Value"].mean(), 2)
+            controls.append(html.Div([
+                html.Label(f"{grp} Threshold:"),
+                dcc.Slider(id={'type': 'cal-slider', 'index': grp}, min=0.5, max=10.0, step=0.1, value=val,
+                           tooltip={"placement": "bottom"})
+            ]))
+    return html.Div(controls)
+
+@app.callback(
+    Output('stored-output', 'data'),
+    Input({'type': 'cal-slider', 'index': dash.ALL}, 'value'),
+    State('calibration-mode', 'value'),
+    State('stored-gfx', 'data'),
+    State('stored-trade', 'data'),
+    prevent_initial_call=True
+)
+def apply_calibration(values, mode, gfx_data, trade_data):
+    if not gfx_data or not trade_data:
+        return dash.no_update
+    gfx_df = pd.DataFrame(gfx_data)
+    trade_df = pd.DataFrame(trade_data)
+    updated_df = gfx_df.copy()
+    if mode == "currency":
+        for i, ccy in enumerate(sorted(updated_df["Currency"].unique())):
+            updated_df.loc[updated_df["Currency"] == ccy, "Value"] = values[i]
+    else:
+        for i, grp in enumerate(sorted(updated_df["Group"].astype(str).unique())):
+            updated_df.loc[updated_df["Group"] == grp, "Value"] = values[i]
+
+    group_map = gfx_df.set_index("Currency")["Group"].to_dict()
+    thresh_before = gfx_df.groupby("Currency")["Value"].max().to_dict()
+    thresh_after = updated_df.groupby("Currency")["Value"].max().to_dict()
+
+    def evaluate(row, t_map):
+        base, quote = row["CCYPair"][:3], row["CCYPair"][3:]
+        b = t_map.get(base, 0)
+        q = t_map.get(quote, 0)
+        return max(b, q)
+
+    trade_df["ThresholdBefore"] = trade_df.apply(lambda x: evaluate(x, thresh_before), axis=1)
+    trade_df["ThresholdAfter"] = trade_df.apply(lambda x: evaluate(x, thresh_after), axis=1)
+    trade_df["AlertBefore"] = trade_df["DeviationPercent"] > trade_df["ThresholdBefore"]
+    trade_df["AlertAfter"] = trade_df["DeviationPercent"] > trade_df["ThresholdAfter"]
+    trade_df["AlertChanged"] = trade_df["AlertBefore"] != trade_df["AlertAfter"]
+    trade_df["Base"] = trade_df["CCYPair"].str[:3]
+    trade_df["Quote"] = trade_df["CCYPair"].str[3:]
+    trade_df["BaseGroup"] = trade_df["Base"].map(group_map)
+    trade_df["QuoteGroup"] = trade_df["Quote"].map(group_map)
+
+    return trade_df.to_dict('records')
+
+@app.callback(
+    Output('summary-kpis', 'children'),
+    Output('alert-comparison-graph', 'figure'),
+    Input('stored-output', 'data')
+)
+def update_summary(data):
+    if not data: return dash.no_update, dash.no_update
+    df = pd.DataFrame(data)
+    total = len(df)
+    before = df["AlertBefore"].sum()
+    after = df["AlertAfter"].sum()
+    changed = df["AlertChanged"].sum()
+
+    kpis = [
+        html.Div(f"Total Trades: {total}", style={'padding': '10px'}),
+        html.Div(f"Alerts Before: {before}", style={'padding': '10px'}),
+        html.Div(f"Alerts After: {after}", style={'padding': '10px'}),
+        html.Div(f"Changed Alerts: {changed}", style={'padding': '10px'})
+    ]
+
+    fig = px.bar(x=["Alerts Before", "Alerts After"], y=[before, after], labels={'x': 'Status', 'y': 'Count'})
+    return kpis, fig
+
+@app.callback(
+    Output('trade-table-container', 'children'),
+    Input('stored-output', 'data')
+)
+def display_trade_table(data):
+    if not data: return dash.no_update
+    df = pd.DataFrame(data)
+    columns = ["TradeID", "CCYPair", "DeviationPercent", "BaseGroup", "QuoteGroup",
+               "ThresholdBefore", "AlertBefore", "ThresholdAfter", "AlertAfter", "AlertChanged"]
+    return dash_table.DataTable(
+        columns=[{"name": i, "id": i} for i in columns],
+        data=df[columns].to_dict('records'),
+        page_size=20,
+        style_table={'overflowX': 'auto'},
+        style_cell={'textAlign': 'left', 'padding': '5px'}
+    )
+
+if __name__ == '__main__':
+    app.run_server(debug=True)

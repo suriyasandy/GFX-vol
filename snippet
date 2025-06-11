@@ -1,0 +1,6 @@
+def get_threshold(ccy_pair, tmap):
+    try:
+        base, quote = str(ccy_pair).split("/")
+    except Exception:
+        base, quote = "", ""
+    return max(tmap.get(base, 0), tmap.get(quote, 0))

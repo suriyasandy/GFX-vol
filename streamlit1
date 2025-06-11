@@ -1,0 +1,154 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+
+st.set_page_config(layout="wide", page_title="FX Alert Calibration App")
+
+st.title("📈 FX Alert Calibration & Impact Analysis")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "1. Upload & Preview",
+    "2. Currency-Level Impact",
+    "3. Group-Level Impact",
+    "4. Summary Comparison"
+])
+
+@st.cache_data
+def load_data(file):
+    return pd.read_csv(file)
+
+with tab1:
+    st.header("📂 Upload Required Files")
+    gfx_file = st.file_uploader("Upload GFX Threshold File (CSV)", type="csv", key="gfx")
+    trade_file = st.file_uploader("Upload Trade File (CSV)", type="csv", key="trade")
+
+    if gfx_file:
+        gfx_df = load_data(gfx_file)
+        st.success(f"✅ GFX File Uploaded: {gfx_file.name} ({len(gfx_df)} rows)")
+        st.dataframe(gfx_df.head(10), use_container_width=True)
+    else:
+        st.stop()
+
+    if trade_file:
+        trade_df = load_data(trade_file)
+        st.success(f"✅ Trade File Uploaded: {trade_file.name} ({len(trade_df)} rows)")
+        st.dataframe(trade_df.head(10), use_container_width=True)
+    else:
+        st.stop()
+
+def evaluate_alerts(trade_df, thresholds, group_map, ccy_col="Instrument"):
+    def get_threshold(ccy_pair, tmap):
+        try:
+            base, quote = str(ccy_pair).split("/")
+        except:
+            base, quote = "", ""
+        return max(tmap.get(base, 0), tmap.get(quote, 0))
+
+    trade_df = trade_df.copy()
+    trade_df["Threshold"] = trade_df[ccy_col].apply(lambda x: get_threshold(x, thresholds))
+    trade_df["Alert"] = trade_df["DeviationPercent"] > trade_df["Threshold"]
+    trade_df["Base"] = trade_df[ccy_col].apply(lambda x: str(x).split("/")[0])
+    trade_df["Quote"] = trade_df[ccy_col].apply(lambda x: str(x).split("/")[1])
+    trade_df["BaseGroup"] = trade_df["Base"].map(group_map)
+    trade_df["QuoteGroup"] = trade_df["Quote"].map(group_map)
+    return trade_df
+
+# --- Shared data loading ---
+gfx_df = load_data(gfx_file)
+trade_df = load_data(trade_file)
+group_map = gfx_df.set_index("Currency")["Group"].astype(str).to_dict()
+
+# --- Tab 2: Currency-Level Calibration ---
+with tab2:
+    st.header("💱 Currency-Level Calibration")
+    currency_thresholds = {}
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_ccys = st.multiselect("Select Currencies", gfx_df["Currency"].unique())
+    with col2:
+        for ccy in selected_ccys:
+            current_val = float(gfx_df[gfx_df["Currency"] == ccy]["Value"].iloc[0])
+            currency_thresholds[ccy] = st.slider(f"{ccy} Threshold", 0.00, 10.00, current_val, 0.01)
+
+    calibrated_df = gfx_df.copy()
+    for ccy, val in currency_thresholds.items():
+        calibrated_df.loc[calibrated_df["Currency"] == ccy, "Value"] = val
+    thresholds_before = gfx_df.groupby("Currency")["Value"].max().to_dict()
+    thresholds_after = calibrated_df.groupby("Currency")["Value"].max().to_dict()
+
+    df_before = evaluate_alerts(trade_df, thresholds_before, group_map)
+    df_after = evaluate_alerts(trade_df, thresholds_after, group_map)
+    df_after = df_after.rename(columns={"Alert": "AlertAfter", "Threshold": "ThresholdAfter"})
+    df_combined = df_before.copy()
+    df_combined["ThresholdAfter"] = df_after["ThresholdAfter"]
+    df_combined["AlertAfter"] = df_after["AlertAfter"]
+    df_combined["AlertBefore"] = df_combined["Alert"]
+    df_combined["AlertChanged"] = df_combined["AlertBefore"] != df_combined["AlertAfter"]
+
+    st.subheader("📊 KPI Summary (Currency-Level)")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Trades", len(df_combined))
+    col2.metric("Alerts Before", int(df_combined["AlertBefore"].sum()))
+    col3.metric("Alerts After", int(df_combined["AlertAfter"].sum()))
+    col4.metric("Changed Alerts", int(df_combined["AlertChanged"].sum()))
+
+    st.plotly_chart(px.bar(
+        x=["Before", "After"], y=[
+            df_combined["AlertBefore"].sum(),
+            df_combined["AlertAfter"].sum()
+        ], labels={"x": "Status", "y": "Alert Count"}, title="Alert Comparison (Currency-Level)"),
+        use_container_width=True
+    )
+    st.dataframe(df_combined.head(500), use_container_width=True)
+
+# --- Tab 3: Group-Level Calibration ---
+with tab3:
+    st.header("📊 Group-Level Calibration")
+    group_thresholds = {}
+    calibrated_group_df = gfx_df.copy()
+    for grp in gfx_df["Group"].astype(str).unique():
+        current_val = float(gfx_df[gfx_df["Group"] == grp]["Value"].mean())
+        group_thresholds[grp] = st.slider(f"{grp} Threshold", 0.00, 10.00, current_val, 0.01)
+        calibrated_group_df.loc[calibrated_group_df["Group"] == grp, "Value"] = group_thresholds[grp]
+
+    thresholds_after_group = calibrated_group_df.groupby("Currency")["Value"].max().to_dict()
+    df_after_group = evaluate_alerts(trade_df, thresholds_after_group, group_map)
+    df_after_group = df_after_group.rename(columns={"Alert": "AlertAfterGroup", "Threshold": "ThresholdAfterGroup"})
+    df_merged = df_combined.copy()
+    df_merged["ThresholdAfterGroup"] = df_after_group["ThresholdAfterGroup"]
+    df_merged["AlertAfterGroup"] = df_after_group["AlertAfterGroup"]
+    df_merged["AlertChangedGroup"] = df_merged["AlertBefore"] != df_merged["AlertAfterGroup"]
+
+    st.subheader("📊 KPI Summary (Group-Level)")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Total Trades", len(df_merged))
+    col2.metric("Alerts Before", int(df_merged["AlertBefore"].sum()))
+    col3.metric("Alerts After (Group)", int(df_merged["AlertAfterGroup"].sum()))
+    col4.metric("Changed Alerts", int(df_merged["AlertChangedGroup"].sum()))
+
+    st.plotly_chart(px.bar(
+        x=["Before", "After (Group)"], y=[
+            df_merged["AlertBefore"].sum(),
+            df_merged["AlertAfterGroup"].sum()
+        ], labels={"x": "Status", "y": "Alert Count"}, title="Alert Comparison (Group-Level)"),
+        use_container_width=True
+    )
+    st.dataframe(df_merged.head(500), use_container_width=True)
+
+# --- Tab 4: Summary Comparison
+with tab4:
+    st.header("📋 Summary: Currency vs Group Calibration")
+    comp_df = pd.DataFrame({
+        "Scenario": ["Original", "Currency-Calibrated", "Group-Calibrated"],
+        "Alerts": [
+            df_merged["AlertBefore"].sum(),
+            df_merged["AlertAfter"].sum(),
+            df_merged["AlertAfterGroup"].sum()
+        ]
+    })
+    st.plotly_chart(px.bar(comp_df, x="Scenario", y="Alerts", color="Scenario", title="Overall Alert Comparison"),
+                    use_container_width=True)
+
+    st.download_button("📥 Download Trade-Level Results", df_merged.to_csv(index=False),
+                       "fx_alert_comparison_results.csv", "text/csv")

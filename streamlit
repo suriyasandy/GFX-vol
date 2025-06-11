@@ -1,0 +1,84 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+
+st.set_page_config(layout="wide")
+st.title("📈 FX Alert Calibration App")
+
+st.markdown("### Upload Files")
+gfx_file = st.file_uploader("Upload GFX Threshold File (CSV)", type="csv")
+trade_file = st.file_uploader("Upload Trade File (CSV)", type="csv")
+
+if gfx_file:
+    gfx_df = pd.read_csv(gfx_file)
+    st.success(f"GFX File Uploaded: {gfx_file.name} ({len(gfx_df)} rows)")
+    st.dataframe(gfx_df.head(10), use_container_width=True)
+else:
+    st.stop()
+
+if trade_file:
+    trade_df = pd.read_csv(trade_file)
+    st.success(f"Trade File Uploaded: {trade_file.name} ({len(trade_df)} rows)")
+    st.dataframe(trade_df.head(10), use_container_width=True)
+else:
+    st.stop()
+
+st.markdown("---")
+st.markdown("### 🎛️ Calibration Options")
+mode = st.radio("Calibration Mode", ["Currency Level", "Group Level"])
+
+calibrated_df = gfx_df.copy()
+
+if mode == "Currency Level":
+    selected_ccys = st.multiselect("Select currencies to override", gfx_df["Currency"].unique())
+    for ccy in selected_ccys:
+        current = float(gfx_df[gfx_df["Currency"] == ccy]["Value"].mean())
+        new_val = st.slider(f"{ccy} new threshold", 0.5, 10.0, current, 0.1)
+        calibrated_df.loc[calibrated_df["Currency"] == ccy, "Value"] = new_val
+else:
+    for grp in gfx_df["Group"].astype(str).unique():
+        current = float(gfx_df[gfx_df["Group"] == grp]["Value"].mean())
+        new_val = st.slider(f"{grp} new threshold", 0.5, 10.0, current, 0.1)
+        calibrated_df.loc[calibrated_df["Group"] == grp, "Value"] = new_val
+
+# Group info (preserved from upload)
+group_map = gfx_df.set_index("Currency")["Group"].to_dict()
+threshold_before = gfx_df.groupby("Currency")["Value"].max().to_dict()
+threshold_after = calibrated_df.groupby("Currency")["Value"].max().to_dict()
+
+# Evaluate alerts
+def get_threshold(ccy_pair, tmap):
+    b, q = ccy_pair[:3], ccy_pair[3:]
+    return max(tmap.get(b, 0), tmap.get(q, 0))
+
+trade_df["ThresholdBefore"] = trade_df["CCYPair"].apply(lambda x: get_threshold(x, threshold_before))
+trade_df["ThresholdAfter"] = trade_df["CCYPair"].apply(lambda x: get_threshold(x, threshold_after))
+trade_df["AlertBefore"] = trade_df["DeviationPercent"] > trade_df["ThresholdBefore"]
+trade_df["AlertAfter"] = trade_df["DeviationPercent"] > trade_df["ThresholdAfter"]
+trade_df["AlertChanged"] = trade_df["AlertBefore"] != trade_df["AlertAfter"]
+trade_df["Base"] = trade_df["CCYPair"].str[:3]
+trade_df["Quote"] = trade_df["CCYPair"].str[3:]
+trade_df["BaseGroup"] = trade_df["Base"].map(group_map)
+trade_df["QuoteGroup"] = trade_df["Quote"].map(group_map)
+
+st.markdown("### 📊 Summary Metrics")
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Trades", len(trade_df))
+col2.metric("Alerts Before", int(trade_df["AlertBefore"].sum()))
+col3.metric("Alerts After", int(trade_df["AlertAfter"].sum()))
+col4.metric("Changed Alerts", int(trade_df["AlertChanged"].sum()))
+
+alert_counts = pd.DataFrame({
+    "Status": ["Before", "After"],
+    "Count": [trade_df["AlertBefore"].sum(), trade_df["AlertAfter"].sum()]
+})
+st.plotly_chart(px.bar(alert_counts, x="Status", y="Count", color="Status", title="Alert Count Comparison"),
+                use_container_width=True)
+
+st.markdown("### 🔍 Trade-Level Alert Comparison")
+cols = ["TradeID", "CCYPair", "Base", "Quote", "BaseGroup", "QuoteGroup",
+        "DeviationPercent", "ThresholdBefore", "AlertBefore", "ThresholdAfter", "AlertAfter", "AlertChanged"]
+st.dataframe(trade_df[cols].head(500), use_container_width=True)
+
+st.download_button("📥 Download Full Result CSV", trade_df.to_csv(index=False), "calibrated_alerts.csv", "text/csv")

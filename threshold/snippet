@@ -1,0 +1,11 @@
+# Assume your dataframe is called df and has:
+# Index = Date, Columns = ['Currency', 'Close']
+
+df_reset = df.reset_index()  # Ensure date is a column if it's the index
+df_pivot = df_reset.pivot(index='index', columns='Currency', values='Close')
+
+# Optional: rename the index for clarity
+df_pivot.index.name = 'Date'
+df_pivot = df_pivot.sort_index()
+
+print(df_pivot.head())

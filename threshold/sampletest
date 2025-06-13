@@ -1,0 +1,54 @@
+import pandas as pd
+import numpy as np
+
+def simulate_and_flag_off_market_trades(
+    df,
+    bid_col='bid',
+    ask_col='ask',
+    pip_size=0.01,
+    multiplier=1.5,
+    slippage_range=(0.0, 0.02)
+):
+    """
+    Simulates buy/sell deal prices using market bid/ask and flags off-market trades.
+    
+    Parameters:
+        df (DataFrame): Must have 'bid' and 'ask' columns
+        pip_size (float): e.g., 0.01 for USDINR
+        multiplier (float): threshold multiplier (e.g., 1.5x spread)
+        slippage_range (tuple): (min_slip, max_slip) added/subtracted from ask/bid for deal simulation
+        
+    Returns:
+        DataFrame: with mid_price, spread, simulated deal prices, thresholds and flags
+    """
+    df = df.copy()
+
+    # Calculate mid and spread
+    df['mid_price'] = (df[bid_col] + df[ask_col]) / 2
+    df['spread'] = df[ask_col] - df[bid_col]
+
+    # Simulate buy-side (near ask) and sell-side (near bid) deal prices with slippage
+    df['deal_price_buy'] = df[ask_col] + np.random.uniform(slippage_range[0], slippage_range[1], len(df))
+    df['deal_price_sell'] = df[bid_col] - np.random.uniform(slippage_range[0], slippage_range[1], len(df))
+
+    # Flag buy deals
+    df_buy_flagged = flag_off_market_trades(
+        df[['deal_price_buy', 'mid_price', 'spread']].rename(columns={
+            'deal_price_buy': 'deal_price'
+        }),
+        pip_size=pip_size,
+        multiplier=multiplier
+    )
+    df['off_market_flag_buy'] = df_buy_flagged['off_market_flag']
+
+    # Flag sell deals
+    df_sell_flagged = flag_off_market_trades(
+        df[['deal_price_sell', 'mid_price', 'spread']].rename(columns={
+            'deal_price_sell': 'deal_price'
+        }),
+        pip_size=pip_size,
+        multiplier=multiplier
+    )
+    df['off_market_flag_sell'] = df_sell_flagged['off_market_flag']
+
+    return df

@@ -1,0 +1,40 @@
+import pandas as pd
+
+def flag_off_market_trades(
+    df,
+    deal_col='deal_price',
+    mid_col='mid_price',
+    spread_col='spread',
+    pip_size=0.01,
+    multiplier=1.5
+):
+    """
+    Flags off-market FX trades based on deviation from mid price and spread-based threshold.
+
+    Parameters:
+        df (pd.DataFrame): Must contain 'deal_price', 'mid_price', and 'spread' columns
+        deal_col (str): Column name for the deal/executed price
+        mid_col (str): Column name for the mid-market price
+        spread_col (str): Column name for the bid-ask spread
+        pip_size (float): Size of one pip (default 0.01 for USDINR)
+        multiplier (float): Threshold multiplier (e.g., 1.5 × spread)
+
+    Returns:
+        pd.DataFrame: Original DataFrame with added columns:
+                      ['abs_dev', 'abs_pip_dev', 'threshold_inr', 'threshold_pips', 'off_market_flag']
+    """
+
+    df = df.copy()
+
+    # Step 1: Calculate absolute deviation from mid
+    df['abs_dev'] = abs(df[deal_col] - df[mid_col])
+    df['abs_pip_dev'] = df['abs_dev'] / pip_size
+
+    # Step 2: Calculate dynamic threshold
+    df['threshold_inr'] = df[spread_col] * multiplier
+    df['threshold_pips'] = df['threshold_inr'] / pip_size
+
+    # Step 3: Flag off-market trades
+    df['off_market_flag'] = df['abs_dev'] > df['threshold_inr']
+
+    return df

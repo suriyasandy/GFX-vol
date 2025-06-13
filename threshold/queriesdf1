@@ -1,0 +1,46 @@
+import pandas as pd
+
+# 1) your trades DataFrame
+trades = pd.DataFrame({
+    'instrument': ['AED/JPY','EUR/USD','AED/JPY','GBP/USD','EUR/USD'],
+    'trade_date': ['2025-05-15','2025-05-15','2025-06-01','2025-06-05','2025-06-03'],
+})
+
+# ensure trade_date is datetime
+trades['trade_date'] = pd.to_datetime(trades['trade_date'])
+
+# 2) compute start/end for each pair
+ranges = (
+    trades
+    .groupby('instrument')['trade_date']
+    .agg(start_date='min', end_date='max')
+    .reset_index()
+)
+# ranges now has one row per instrument with its date window
+
+# 3) explode each pair into its two USD‐based legs and build q-queries
+rows = []
+for _, row in ranges.iterrows():
+    instr      = row['instrument']
+    start_kdb  = row['start_date'].strftime('%Y.%m.%d')
+    end_kdb    = row['end_date'].strftime('%Y.%m.%d')
+    base, quote = instr.split('/')
+
+    # for each leg, prefix with USD.
+    for ccy in (base, quote):
+        sym = f'USD.{ccy}'
+        q = (
+            f"select date, close "
+            f"from {sym} "
+            f"where date within({start_kdb}; {end_kdb});"
+        )
+        rows.append({
+            'instrument': instr,
+            'symbol':     sym,
+            'start_date': row['start_date'].date(),
+            'end_date':   row['end_date'].date(),
+            'q_query':    q
+        })
+
+queries_df = pd.DataFrame(rows)
+print(queries_df)

@@ -1,0 +1,40 @@
+import pandas as pd
+
+# — your raw trades DataFrame —
+# must have at least these two columns:
+#   'instrument'  e.g. "AED/JPY"
+#   'trade_date'  e.g. "2025-05-15"
+trades = pd.DataFrame({
+    'instrument': ['AED/JPY','EUR/USD','AED/JPY','GBP/USD'],
+    'trade_date': ['2025-05-15','2025-05-15','2025-05-16','2025-05-16'],
+})
+
+# 1) drop duplicates so we query each combo only once
+unique_trades = trades[['instrument','trade_date']].drop_duplicates()
+
+# 2) build your q-query for each leg on that one date
+rows = []
+for _, row in unique_trades.iterrows():
+    instr = row['instrument']
+    date_str = row['trade_date']
+    # kdb date literals expect dots, not hyphens:
+    kdb_date = date_str.replace('-', '.')
+    
+    # split "AED/JPY" → ["AED","JPY"]
+    ccy1, ccy2 = instr.split('/')
+    for ccy in (ccy1, ccy2):
+        sym = f'USD.{ccy}'   # e.g. "USD.AED", "USD.JPY"
+        q = (
+            f"select date, close "
+            f"from {sym} "
+            f"where date={kdb_date};"
+        )
+        rows.append({
+            'instrument': instr,
+            'trade_date': date_str,
+            'symbol':      sym,
+            'q_query':     q
+        })
+
+queries_df = pd.DataFrame(rows)
+print(queries_df)

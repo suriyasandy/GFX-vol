@@ -1,0 +1,7 @@
+from sklearn.ensemble import IsolationForest
+
+model = IsolationForest(contamination=0.01, random_state=42)
+df['anomaly_score'] = model.fit_predict(df[['spread', 'abs(pip)']])
+df['anomaly'] = df['anomaly_score'] == -1
+
+df[['spread', 'upper_threshold', 'lower_threshold']].plot()

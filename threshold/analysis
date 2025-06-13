@@ -5,3 +5,6 @@ df['anomaly_score'] = model.fit_predict(df[['spread', 'abs(pip)']])
 df['anomaly'] = df['anomaly_score'] == -1
 
 df[['spread', 'upper_threshold', 'lower_threshold']].plot()
+df['upper_threshold'] = df['spread_rolling_mean'] + 2 * df['spread_rolling_std']
+df['lower_threshold'] = df['spread_rolling_mean'] - 2 * df['spread_rolling_std']
+df['flag'] = (df['spread'] > df['upper_threshold']) | (df['spread'] < df['lower_threshold'])

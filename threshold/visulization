@@ -1,0 +1,18 @@
+plt.figure(figsize=(12, 6))
+plt.plot(df.index, df['mid_price'], label='Mid Price', marker='o', color='black')
+plt.plot(df.index, df['deal_price'], label='Deal Price', marker='x', linestyle='--', color='blue')
+plt.plot(df.index, df['upper_threshold'], label='Upper Threshold', linestyle=':', color='gray')
+plt.plot(df.index, df['lower_threshold'], label='Lower Threshold', linestyle=':', color='gray')
+
+# Highlight flagged deals
+flagged = df[df['off_market_flag']]
+plt.scatter(flagged.index, flagged['deal_price'], color='red', label='Flagged Trade', zorder=5, s=100, edgecolors='black')
+
+plt.title("Off-Market Flagging: Absolute Deviation from Mid vs Rounded Threshold")
+plt.xlabel("Date")
+plt.ylabel("Price (INR)")
+plt.xticks(rotation=45)
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()

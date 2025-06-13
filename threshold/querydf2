@@ -1,0 +1,46 @@
+import pandas as pd
+
+# 1) your trades DataFrame
+trades = pd.DataFrame({
+    'instrument': ['AED/JPY','EUR/USD','AED/JPY','GBP/USD','USD/CHF'],
+    'trade_date': ['2025-05-15','2025-05-15','2025-06-01','2025-06-05','2025-06-10'],
+})
+
+# 2) parse dates (drop any bad ones)
+trades['trade_date'] = pd.to_datetime(trades['trade_date'], errors='coerce')
+trades = trades.dropna(subset=['trade_date'])
+
+# 3) split each instrument into two currencies
+trades[['ccy1','ccy2']] = trades['instrument'].str.split('/', expand=True)
+
+# 4) unpivot so each row is one currency + its trade_date
+currs = (
+    trades
+    .melt(id_vars='trade_date', value_vars=['ccy1','ccy2'], value_name='currency')
+    [['trade_date','currency']]
+)
+
+# 5) drop USD itself (we don’t query USD.USD) and dedupe
+currs = currs[currs['currency'] != 'USD'].drop_duplicates()
+
+# 6) compute start/end date per currency
+ranges = (
+    currs
+    .groupby('currency')['trade_date']
+    .agg(start_date='min', end_date='max')
+    .reset_index()
+)
+
+# 7) build one kdb+/q query per currency
+def make_query(ccy, start, end):
+    sd = start.strftime('%Y.%m.%d')
+    ed = end.strftime('%Y.%m.%d')
+    sym = f'USD.{ccy}'
+    return f"select date, close from {sym} where date within({sd}; {ed});"
+
+ranges['q_query'] = ranges.apply(
+    lambda r: make_query(r['currency'], r['start_date'], r['end_date']),
+    axis=1
+)
+
+print(ranges[['currency','start_date','end_date','q_query']])

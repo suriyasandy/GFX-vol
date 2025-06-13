@@ -1,0 +1,58 @@
+def flag_off_market_trades(
+    df,
+    deal_col='deal_price',
+    mid_col='mid_price',
+    spread_col='spread',
+    pip_size=0.01,
+    multiplier=1.5
+):
+    df = df.copy()
+    df['abs_dev'] = abs(df[deal_col] - df[mid_col])
+    df['abs_pip_dev'] = df['abs_dev'] / pip_size
+    df['threshold_inr'] = df[spread_col] * multiplier
+    df['threshold_pips'] = df['threshold_inr'] / pip_size
+    df['off_market_flag'] = df['abs_dev'] > df['threshold_inr']
+    return df
+
+def simulate_and_flag_off_market_trades(
+    df,
+    bid_col='bid',
+    ask_col='ask',
+    pip_size=0.01,
+    multiplier=1.5,
+    slippage_range=(0.0, 0.02)
+):
+    df = df.copy()
+    df['mid_price'] = (df[bid_col] + df[ask_col]) / 2
+    df['spread'] = df[ask_col] - df[bid_col]
+
+    df['deal_price_buy'] = df[ask_col] + np.random.uniform(slippage_range[0], slippage_range[1], len(df))
+    df['deal_price_sell'] = df[bid_col] - np.random.uniform(slippage_range[0], slippage_range[1], len(df))
+
+    df_buy_flagged = flag_off_market_trades(
+        df[['deal_price_buy', 'mid_price', 'spread']].rename(columns={
+            'deal_price_buy': 'deal_price'
+        }),
+        pip_size=pip_size,
+        multiplier=multiplier
+    )
+    df['off_market_flag_buy'] = df_buy_flagged['off_market_flag']
+
+    df_sell_flagged = flag_off_market_trades(
+        df[['deal_price_sell', 'mid_price', 'spread']].rename(columns={
+            'deal_price_sell': 'deal_price'
+        }),
+        pip_size=pip_size,
+        multiplier=multiplier
+    )
+    df['off_market_flag_sell'] = df_sell_flagged['off_market_flag']
+
+    return df
+
+df = pd.DataFrame({
+    'bid': [83.823, 83.825, 83.830],
+    'ask': [83.833, 83.835, 83.840]
+})
+
+result = simulate_and_flag_off_market_trades(df)
+print(result[['bid', 'ask', 'deal_price_buy', 'deal_price_sell', 'off_market_flag_buy', 'off_market_flag_sell']])

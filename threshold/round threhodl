@@ -1,0 +1,22 @@
+def custom_threshold_round(x):
+    """
+    Custom rounding rule:
+    - If decimal part is .05, .15, etc. → round up to next 0.1
+    - Otherwise, round to nearest 0.01, then:
+        - if < 0.05 → keep
+        - if ≥ 0.05 → round to nearest 0.1
+    """
+    base = round(x, 2)
+    decimal = base * 100 % 10  # get second decimal digit
+
+    if decimal == 5:
+        return round(np.ceil(base * 10) / 10, 1)
+    elif base % 0.1 >= 0.05:
+        return round(np.ceil(base * 10) / 10, 1)
+    else:
+        return base
+
+df['raw_threshold'] = df['spread'] * multiplier
+df['threshold'] = df['raw_threshold'].apply(custom_threshold_round)
+df['upper_threshold'] = df['mid_price'] + df['threshold']
+df['lower_threshold'] = df['mid_price'] - df['threshold']
